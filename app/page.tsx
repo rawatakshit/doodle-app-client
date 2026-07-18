@@ -1,16 +1,26 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import { Pen, Eraser, Undo2, Redo2, Trash2 } from 'lucide-react';
 
 const SOCKET_URL = process.env.NEXT_PUBLIC_WS_URL || "http://localhost:3001";
 const socket = io(SOCKET_URL);
 
+const getCursorColor = (id: string) => {
+  const colors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
+  let sum = 0;
+  for (let i = 0; i < id.length; i++) {
+    sum += id.charCodeAt(i);
+  }
+  return colors[sum % colors.length];
+};
+
 export default function Whiteboard() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [color, setColor] = useState('#000000');
-  const [isEraser, setIsEraser] = useState(false);
-  const [brushSize, setBrushSize] = useState(3);
+  const [color, setColor] = useState('#2563eb');
+  const [activeTool, setActiveTool] = useState<'pen' | 'eraser'>('pen');
+  const [brushSize, setBrushSize] = useState(4);
   
   const [cursors, setCursors] = useState<{ [id: string]: { x: number, y: number } }>({});
   
@@ -23,21 +33,28 @@ export default function Whiteboard() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Clear everything before redrawing
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
     history.forEach((stroke) => {
       stroke.lines.forEach((line: any) => {
+        // Support for the true eraser
+        const isEraserLine = line.isEraser || line.color === '#ffffff'; 
+        ctx.globalCompositeOperation = isEraserLine ? 'destination-out' : 'source-over';
+        
         ctx.beginPath();
-        ctx.strokeStyle = line.color;
+        // Color doesn't matter for destination-out, it just removes pixels
+        ctx.strokeStyle = isEraserLine ? 'rgba(0,0,0,1)' : line.color;
         ctx.lineWidth = line.lineWidth;
         ctx.moveTo(line.x0 * canvas.width, line.y0 * canvas.height);
         ctx.lineTo(line.x1 * canvas.width, line.y1 * canvas.height);
         ctx.stroke();
       });
     });
+    
+    // Reset to default drawing mode just in case
+    ctx.globalCompositeOperation = 'source-over';
   };
 
   useEffect(() => {
@@ -57,12 +74,18 @@ export default function Whiteboard() {
     socket.on("drawing", (data) => {
       const w = canvas.width;
       const h = canvas.height;
+      
+      const isEraserLine = data.isEraser || data.color === '#ffffff';
+      ctx.globalCompositeOperation = isEraserLine ? 'destination-out' : 'source-over';
+      
       ctx.beginPath();
-      ctx.strokeStyle = data.color;
+      ctx.strokeStyle = isEraserLine ? 'rgba(0,0,0,1)' : data.color;
       ctx.lineWidth = data.lineWidth; 
       ctx.moveTo(data.x0 * w, data.y0 * h);
       ctx.lineTo(data.x1 * w, data.y1 * h);
       ctx.stroke();
+      
+      ctx.globalCompositeOperation = 'source-over';
     });
 
     socket.on("cursor-move", (data) => {
@@ -87,7 +110,6 @@ export default function Whiteboard() {
     const handleResize = () => {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
-      // You can implement an emit to request history again on resize if needed
     };
     window.addEventListener('resize', handleResize);
 
@@ -126,15 +148,21 @@ export default function Whiteboard() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const currentColor = isEraser ? '#ffffff' : color; 
-    const currentLineWidth = isEraser ? 20 : brushSize;
+    const isEraser = activeTool === 'eraser';
+    const currentLineWidth = isEraser ? 24 : brushSize;
+
+    // Use destination-out to erase pixels, source-over to draw
+    ctx.globalCompositeOperation = isEraser ? 'destination-out' : 'source-over';
 
     ctx.beginPath();
-    ctx.strokeStyle = currentColor;
+    ctx.strokeStyle = isEraser ? 'rgba(0,0,0,1)' : color;
     ctx.lineWidth = currentLineWidth;
     ctx.moveTo(lastPos.current.x, lastPos.current.y);
     ctx.lineTo(currentX, currentY);
     ctx.stroke();
+    
+    // Reset back to default
+    ctx.globalCompositeOperation = 'source-over';
 
     socket.emit("drawing", { 
         strokeId: currentStrokeId.current,
@@ -142,8 +170,9 @@ export default function Whiteboard() {
         y0: lastPos.current.y / h, 
         x1: currentX / w, 
         y1: currentY / h,
-        color: currentColor,
-        lineWidth: currentLineWidth
+        color: color,
+        lineWidth: currentLineWidth,
+        isEraser: isEraser // Send the tool state to the server
     });
 
     lastPos.current = { x: currentX, y: currentY };
@@ -154,7 +183,6 @@ export default function Whiteboard() {
     currentStrokeId.current = "";
   };
 
-  // IMMEDIATE LOCAL CLEAR
   const clearBoard = () => {
     const canvas = canvasRef.current;
     if (canvas) {
@@ -167,75 +195,117 @@ export default function Whiteboard() {
   const redo = () => socket.emit("redo");
 
   return (
-    <div className="h-screen w-screen bg-white overflow-hidden relative font-sans">
+    <div 
+      className="h-screen w-screen overflow-hidden relative font-sans"
+      style={{ 
+        backgroundColor: '#fafafa',
+        backgroundImage: 'radial-gradient(#d4d4d8 1px, transparent 1px)', 
+        backgroundSize: '24px 24px' 
+      }}
+    >
       
-      {/* TOOLBAR */}
-      <div className="absolute top-6 left-1/2 -translate-x-1/2 flex gap-4 bg-white border border-gray-200 p-3 rounded-xl shadow-lg items-center z-10">
+      {/* GLASSMORPHIC TOOLBAR */}
+      <div className="absolute top-6 left-1/2 -translate-x-1/2 flex gap-2 bg-white/80 backdrop-blur-md border border-gray-200/50 p-2 rounded-2xl shadow-xl items-center z-10 transition-all">
         
         <button 
-          onClick={() => setIsEraser(false)}
-          className={`px-4 py-2 font-bold rounded-lg transition-colors ${
-            !isEraser ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+          onClick={() => setActiveTool('pen')}
+          title="Pen Tool"
+          className={`p-3 rounded-xl transition-all flex items-center justify-center ${
+            activeTool === 'pen' ? 'bg-blue-100 text-blue-600 shadow-sm' : 'hover:bg-gray-100 text-gray-500'
           }`}
         >
-          Pen
+          <Pen size={20} strokeWidth={2.5} />
         </button>
 
-        <input 
-          type="color" 
-          value={color} 
-          onChange={(e) => { setColor(e.target.value); setIsEraser(false); }}
-          className="w-10 h-10 cursor-pointer rounded bg-transparent border-none"
-        />
+        <div className={`p-1 rounded-xl transition-all ${activeTool === 'pen' ? 'bg-gray-50' : ''}`}>
+          <input 
+            type="color" 
+            value={color} 
+            title="Choose Color"
+            onChange={(e) => { setColor(e.target.value); setActiveTool('pen'); }}
+            className="w-8 h-8 cursor-pointer rounded-lg bg-transparent border-none block"
+            style={{ padding: 0 }}
+          />
+        </div>
 
-        <div className="flex items-center gap-2 px-2 border-l border-r border-gray-300">
-          <span className="text-sm font-medium text-gray-500 w-8 text-center">{brushSize}px</span>
+        <div className="flex items-center gap-3 px-3 mx-1 border-l border-r border-gray-200">
+          <div 
+            className="rounded-full bg-gray-800" 
+            style={{ width: brushSize, height: brushSize, minWidth: '4px', minHeight: '4px' }}
+          />
           <input 
             type="range" min="1" max="30" value={brushSize} 
-            onChange={(e) => { setBrushSize(Number(e.target.value)); setIsEraser(false); }}
+            onChange={(e) => { setBrushSize(Number(e.target.value)); }}
             className="w-24 cursor-pointer accent-blue-600"
           />
         </div>
 
         <button 
-          onClick={() => setIsEraser(true)}
-          className={`px-4 py-2 font-bold rounded-lg transition-colors ${
-            isEraser ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+          onClick={() => setActiveTool('eraser')}
+          title="Eraser Tool"
+          className={`p-3 rounded-xl transition-all flex items-center justify-center ${
+            activeTool === 'eraser' ? 'bg-blue-100 text-blue-600 shadow-sm' : 'hover:bg-gray-100 text-gray-500'
           }`}
         >
-          Eraser
+          <Eraser size={20} strokeWidth={2.5} />
         </button>
         
-        <div className="w-px h-8 bg-gray-300 mx-2"></div>
+        <div className="w-px h-8 bg-gray-200 mx-1"></div>
 
-        <button onClick={undo} className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-lg transition-colors">
-          Undo
-        </button>
-        <button onClick={redo} className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-lg transition-colors">
-          Redo
-        </button>
+        <div className="flex gap-1">
+          <button onClick={undo} title="Undo" className="p-3 rounded-xl hover:bg-gray-100 text-gray-500 transition-colors">
+            <Undo2 size={20} strokeWidth={2.5} />
+          </button>
+          <button onClick={redo} title="Redo" className="p-3 rounded-xl hover:bg-gray-100 text-gray-500 transition-colors">
+            <Redo2 size={20} strokeWidth={2.5} />
+          </button>
+        </div>
 
-        <div className="w-px h-8 bg-gray-300 mx-2"></div>
+        <div className="w-px h-8 bg-gray-200 mx-1"></div>
 
-        <button onClick={clearBoard} className="px-4 py-2 bg-red-50 hover:text-red-700 hover:bg-red-100 text-red-600 font-bold rounded-lg transition-colors">
-          Clear
+        <button 
+          onClick={clearBoard} 
+          title="Clear Canvas"
+          className="p-3 rounded-xl hover:bg-red-50 text-red-500 transition-colors group flex items-center justify-center"
+        >
+          <Trash2 size={20} strokeWidth={2.5} className="group-hover:scale-110 transition-transform" />
         </button>
       </div>
 
-      {/* CURSORS */}
-      {Object.entries(cursors).map(([id, pos]) => (
-        <div 
-          key={id} 
-          className="absolute pointer-events-none z-20 flex items-center justify-center transition-all duration-75"
-          style={{ left: pos.x, top: pos.y, transform: 'translate(-50%, -50%)' }}
-        >
-          <div className="w-4 h-4 bg-red-500 rounded-full shadow-md border-2 border-white"></div>
-        </div>
-      ))}
+      {/* REMOTE CURSORS */}
+      {Object.entries(cursors).map(([id, pos]) => {
+        const cursorColor = getCursorColor(id);
+        return (
+          <div 
+            key={id} 
+            className="absolute pointer-events-none z-20 transition-all duration-75 ease-out flex flex-col items-center"
+            style={{ left: pos.x, top: pos.y }}
+          >
+            <svg 
+              width="24" 
+              height="36" 
+              viewBox="0 0 24 36" 
+              fill="none" 
+              xmlns="http://www.w3.org/2000/svg"
+              className="drop-shadow-md"
+              style={{ transform: 'rotate(-15deg)', transformOrigin: 'top left' }}
+            >
+              <path 
+                d="M5.4 29.5312L0 0L24 10.9688L13.8824 14.7344L18.7059 27.6562L13.0588 30L8.23529 17.0781L5.4 29.5312Z" 
+                fill={cursorColor}
+                stroke="white"
+                strokeWidth="2"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+        );
+      })}
 
       <canvas 
         ref={canvasRef} 
-        className="cursor-crosshair block w-full h-full"
+        className="block w-full h-full touch-none"
+        style={{ cursor: activeTool === 'eraser' ? 'cell' : 'crosshair' }}
         onMouseDown={startDrawing}
         onMouseUp={stopDrawing}
         onMouseLeave={stopDrawing}
